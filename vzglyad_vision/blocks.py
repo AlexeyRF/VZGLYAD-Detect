@@ -50,18 +50,20 @@ class C2f(nn.Module):
 
 class SPPF(nn.Module):
     """Spatial Pyramid Pooling - Fast (SPPF) layer."""
-    def __init__(self, c1, c2, k=5):
+    def __init__(self, c1, c2, k=5, n=3, shortcut=False):
         super().__init__()
         c_ = c1 // 2
         self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)
+        self.cv2 = Conv(c_ * (n + 1), c2, 1, 1)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.n = n
+        self.add = shortcut and c1 == c2
 
     def forward(self, x):
-        x = self.cv1(x)
-        y1 = self.m(x)
-        y2 = self.m(y1)
-        return self.cv2(torch.cat((x, y1, y2, self.m(y2)), 1))
+        y = [self.cv1(x)]
+        y.extend((self.m(y[-1]) for _ in range(self.n)))
+        y_cat = self.cv2(torch.cat(y, 1))
+        return y_cat + x if self.add else y_cat
 
 class Concat(nn.Module):
     """Concatenate a list of tensors along dimension."""
@@ -112,18 +114,24 @@ class DFL(nn.Module):
 
 class Detect(nn.Module):
     """Detect head for detection models."""
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, ch=(), reg_max=16):
         super().__init__()
         self.nc = nc
         self.nl = len(ch)
-        self.reg_max = 16
+        self.reg_max = reg_max
         self.no = nc + self.reg_max * 4
         self.stride = torch.zeros(self.nl)
         
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))
         self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
-        self.dfl = DFL(self.reg_max)
+        
+        # YOLO11 uses DWConv (Depthwise + Pointwise) in cv3 classification branch
+        self.cv3 = nn.ModuleList(nn.Sequential(
+            nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)),
+            nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)),
+            nn.Conv2d(c3, self.nc, 1)
+        ) for x in ch)
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
         self.shape = None
         self.anchors = torch.empty(0)
         self.strides = torch.empty(0)
@@ -143,3 +151,83 @@ class Detect(nn.Module):
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
         y = torch.cat((dbox, cls.sigmoid()), 1)
         return y
+
+class C3(nn.Module):
+    """CSP Bottleneck with 3 convolutions."""
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=((1, 1), (3, 3)), e=1.0) for _ in range(n)))
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+class C3k(C3):
+    """C3k is a CSP bottleneck module with customizable kernel sizes."""
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, k=3):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
+
+class Attention(nn.Module):
+    def __init__(self, dim, num_heads=8, attn_ratio=0.5):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.key_dim = int(self.head_dim * attn_ratio)
+        self.scale = self.key_dim ** (-0.5)
+        nh_kd = self.key_dim * num_heads
+        h = dim + nh_kd * 2
+        self.qkv = Conv(dim, h, 1, act=False)
+        self.proj = Conv(dim, dim, 1, act=False)
+        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        N = H * W
+        qkv = self.qkv(x)
+        q, k, v = qkv.view(B, self.num_heads, self.key_dim * 2 + self.head_dim, N).split([self.key_dim, self.key_dim, self.head_dim], dim=2)
+        attn = q.transpose(-2, -1) @ k * self.scale
+        attn = attn.softmax(dim=-1)
+        x = (v @ attn.transpose(-2, -1)).view(B, C, H, W) + self.pe(v.reshape(B, C, H, W))
+        x = self.proj(x)
+        return x
+
+class PSABlock(nn.Module):
+    def __init__(self, c, attn_ratio=0.5, num_heads=4, shortcut=True):
+        super().__init__()
+        self.attn = Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)
+        self.ffn = nn.Sequential(Conv(c, c * 2, 1), Conv(c * 2, c, 1, act=False))
+        self.add = shortcut
+
+    def forward(self, x):
+        x = x + self.attn(x) if self.add else self.attn(x)
+        x = x + self.ffn(x) if self.add else self.ffn(x)
+        return x
+
+class C2PSA(nn.Module):
+    def __init__(self, c1, c2, n=1, e=0.5):
+        super().__init__()
+        assert c1 == c2
+        self.c = int(c1 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv(2 * self.c, c1, 1)
+        self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=max(self.c // 64, 1)) for _ in range(n)))
+
+    def forward(self, x):
+        a, b = self.cv1(x).split((self.c, self.c), dim=1)
+        b = self.m(b)
+        return self.cv2(torch.cat((a, b), 1))
+
+class C3k2(C2f):
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, attn=False, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            nn.Sequential(Bottleneck(self.c, self.c, shortcut, g), PSABlock(self.c, attn_ratio=0.5, num_heads=max(self.c // 64, 1))) if attn 
+            else C3k(self.c, self.c, 2, shortcut, g) if c3k 
+            else Bottleneck(self.c, self.c, shortcut, g) 
+            for _ in range(n)
+        )
