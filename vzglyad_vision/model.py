@@ -27,19 +27,27 @@ def parse_model(d, ch):
     yaml_layers = d.get('backbone', []) + d.get('head', [])
     
     for i, (f, n, m_name, args) in enumerate(yaml_layers):
-        m = getattr(blocks, m_name) if isinstance(m_name, str) else m_name
+        if isinstance(m_name, str):
+            if m_name == 'nn.Upsample':
+                m = nn.Upsample
+            else:
+                m = getattr(blocks, m_name)
+        else:
+            m = m_name
         for j, a in enumerate(args):
-            if isinstance(a, str) and a == 'nc':
-                args[j] = nc
-                
+            if isinstance(a, str):
+                if a == 'nc':
+                    args[j] = nc
+                elif a == 'None':
+                    args[j] = None
         n = max(round(n * depth_multiple), 1) if n > 1 else n
         
-        if m in (blocks.Conv, blocks.Bottleneck, blocks.SPPF, blocks.C2f):
+        if m in (blocks.Conv, blocks.Bottleneck, blocks.SPPF, blocks.C2f, blocks.C3k2, blocks.C2PSA):
             c1, c2 = ch[f], args[0]
             if c2 != nc:
                 c2 = make_divisible(min(c2, max_channels) * width_multiple, 8)
             args = [c1, c2, *args[1:]]
-            if m in (blocks.Bottleneck, blocks.C2f):
+            if m in (blocks.Bottleneck, blocks.C2f, blocks.C3k2, blocks.C2PSA):
                 args.insert(2, n)
                 n = 1
                 
@@ -50,6 +58,8 @@ def parse_model(d, ch):
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):
                 args[1] = [list(range(args[1] * 2))] * len(f)
+            if 'reg_max' in d:
+                args.append(d['reg_max'])
                 
         elif m is nn.Upsample:
             c2 = ch[f]
