@@ -13,7 +13,7 @@ Vzglyad - это независимая и легковесная библиот
 
 ### Использование
 
-Для использования библиотеки необходимо предварительно конвертировать вашу оригинальную модель (.pt) в формат (.pth) с помощью отдельного конвертера [YoloPT-to-VZglyad-detectPTH](https://github.com/AlexeyRF/YoloPT-to-VZglyad-detectPTH).
+Для использования библиотеки необходимо предварительно конвертировать вашу оригинальную модель (.pt) в формат (.pth) с помощью отдельного конвертера [YoloPT-to-VZglyad-detectPTH](https://github.com/AlexeyRF/YoloPT-to-VZglyad-detectPTH). Или обучите её сразу в pth (https://github.com/AlexeyRF/VZglyad-Detect-training) (лучше)
 
 ```python
 import cv2
@@ -50,7 +50,7 @@ Vzglyad is an independent, lightweight vision library for object detection infer
 
 ### Usage
 
-To use the library, you must first convert your original model (.pt) to the (.pth) format using the separate converter tool [YoloPT-to-VZglyad-detectPTH](https://github.com/AlexeyRF/YoloPT-to-VZglyad-detectPTH).
+To use the library, you must first convert your original model (.pt) to the (.pth) format using the separate converter tool [YoloPT-to-VZglyad-detectPTH](https://github.com/AlexeyRF/YoloPT-to-VZglyad-detectPTH). Or train in pth (https://github.com/AlexeyRF/VZglyad-Detect-training) (best variant)
 
 ```python
 import cv2
