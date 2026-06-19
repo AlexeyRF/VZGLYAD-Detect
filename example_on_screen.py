@@ -5,7 +5,7 @@ from vzglyad_vision import VisionPredictor
 
 def main():
     try:
-        predictor = VisionPredictor(r"path\to\your\model", device='cpu')
+        predictor = VisionPredictor(r"an_85.pth", device='cpu')
     except Exception as e:
         print(f"Error loading model: {e}")
         return
